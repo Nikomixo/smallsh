@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 const int MAX_LEN = 256;
 
@@ -77,10 +78,40 @@ void sh_loop() {
 int launch(struct cmd* currCmd) {
     pid_t pid, wid;
     int s = 0;
+    int fd;
 
     pid = fork();
     switch(pid) {
     case 0: //child
+        //input output redirections
+        if(currCmd->input != NULL) { 
+            if((fd = open(currCmd->input, O_RDONLY)) == -1) {
+                printf("cannot open %s for input\n", currCmd->input); //file opening failed
+                s = 1;
+                exit(EXIT_FAILURE);
+            } else {
+                if(dup2(fd, 0) == -1) {
+                    perror("input"); //file redirection failed
+                    s = 1;
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
+
+        if(currCmd->output != NULL) { 
+            if((fd = open(currCmd->output, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1) {
+                printf("cannot open %s for input\n", currCmd->output); //file opening failed
+                s = 1;
+                exit(EXIT_FAILURE);
+            } else {
+                if(dup2(fd, 1) == -1) {
+                    perror("output"); //file redirection failed
+                    s = 1;
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
+
         if(execvp(currCmd->sh_argv[0], currCmd->sh_argv) == -1) {
             perror("Error");
             fflush(stdout);
