@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -83,18 +84,19 @@ int launch(struct cmd* currCmd) {
         if(execvp(currCmd->sh_argv[0], currCmd->sh_argv) == -1) {
             perror("Error");
             fflush(stdout);
-            return EXIT_FAILURE; // exit child
+            exit(EXIT_FAILURE);
         }
-    case -1: //stinky
+        break;
+    case -1: //stinky while forking
         perror("Error");
         fflush(stdout);
         break;
     default: //parent, wait for child to be done
         wid = waitpid(pid, &s, 0);
         fflush(stdout);
-        if(s != 0) s = 1;
         break;
     }
+    if(s != 0) s = 1;
     return s;
 }
 
@@ -180,9 +182,32 @@ char* sh_readline() {
     int len = 0;
     int c;
 
+    char* pid = malloc(sizeof(char) * floor(log10(getpid()) + 1) + 1); //malloc strlen of pid, floor(log10(getpid()) + 1) gets strlen of int, another +1 for null terminator.
+    sprintf(pid, "%d", getpid());
+
     //reading char from stdin into c, if \n or EOF then stop reading
-    while((c = getchar()) != '\n' && c != EOF) {
-        buffer[len++] = (char) c;
+    c = getchar();
+    while(c != '\n' && c != EOF) {
+        //variable expansion is done here
+        if(c == '$') {
+            if((c = getchar()) == '$'){
+                //$$ found, replacing it with process id.
+                for(int i = 0; i < strlen(pid); i++) {
+                    buffer[len++] = pid[i];
+                    if(len >= buffsize) { //pid str exceeded buffer size, need to realloc
+                        buffsize += MAX_LEN;
+                        buffer = realloc(buffer, buffsize);
+                    }
+                }
+                c = getchar();
+            } else {
+                buffer[len++] = '$';
+            }
+        } else {
+            buffer[len++] = (char) c;
+            c = getchar();
+        }
+        
 
         //uh oh input exceeded buffer size, time to realloc
         if(len >= buffsize) {
@@ -192,6 +217,7 @@ char* sh_readline() {
     }
     //null terminate string
     buffer[len] = '\0';
+    free(pid);
 
     return buffer;
 }
