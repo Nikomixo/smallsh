@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <signal.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,7 +7,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
-#include <signal.h>
+
 
 const int MAX_LEN = 256;
 
@@ -18,13 +19,16 @@ const int MAX_LEN = 256;
 //from https://brennan.io/2015/01/16/write-a-shell-in-c/
 #define CMD_DELIM " \t\r\n\a" 
 
-void sh_loop();
+//function prototypes
 char* sh_readline();
 struct cmd* sh_processline(char* line);
 int sh_execcmd(struct cmd* currCmd, int* status, int* pcount, pid_t** parr);
 int launch(struct cmd* currCmd, int* pcount, pid_t** parr);
 int checkbgp(int* pcount, pid_t** parr);
 void printStatus(int s);
+
+void ST_handler(int signo);
+void SI_handler(int signo);
 
 struct cmd {
     char** sh_argv;
@@ -34,22 +38,31 @@ struct cmd {
     int bg_task;
 };
 
+int fgmode = 0; //foreground mode, global var so it can be accessed from the signal handler
+
 int main(int argc, char* argv[]) {
 
-    // shell body loop
-    sh_loop();
-
-    return EXIT_SUCCESS;
-}
-
-
-void sh_loop() {
     int status = 0;
     int running = 1;
     int pcount = 0; //background processes count
     pid_t* parr = NULL;    //array of background pids
     char* line;
     struct cmd* currCmd;
+
+    //catch ^C
+    struct sigaction SI_act = {0};
+    SI_act.sa_handler = SIG_IGN;
+    sigfillset(&SI_act.sa_mask);
+    SI_act.sa_flags = 0;
+    sigaction(SIGINT, &SI_act, NULL);
+
+    //catch ^Z
+    struct sigaction ST_act = {0};
+    ST_act.sa_handler = ST_handler;
+    sigfillset(&ST_act.sa_mask);
+    ST_act.sa_flags = 0;
+    sigaction(SIGTSTP, &ST_act, NULL);
+
 
     do {
         checkbgp(&pcount, &parr);
@@ -76,9 +89,29 @@ void sh_loop() {
 
             free(currCmd->sh_argv);
             free(currCmd);
+            free(line);
         }        
-        free(line);
     } while (running);
+    
+    return EXIT_SUCCESS;
+}
+
+//signal handlers
+void ST_handler(int signo) {
+    char* entryMessage = "\nEntering foreground-only mode (& is now ignored)\n";
+    char* exitMessage = "\nExiting foreground-only mode\n";
+    if(fgmode == 0) {
+        write(STDOUT_FILENO, entryMessage, strlen(entryMessage));
+        fgmode = 1;
+    } else {
+        write(STDOUT_FILENO, exitMessage, strlen(exitMessage));
+        fgmode = 0;
+    }
+    fflush(stdout);
+}
+
+void SI_handler(int signo) {
+    raise(SIGINT);
 }
 
 //checking if background processes are completed or not.
@@ -89,7 +122,7 @@ int checkbgp(int* pcount, pid_t** parr) {
     int pos = -1;
 
     while((pid = waitpid(-1, &s, WNOHANG)) > 0) {
-        
+
         if(s <= 1) {
             printf("background pid %d is done, exit value %d\n", pid, s);
         } else {
@@ -123,9 +156,24 @@ int launch(struct cmd* currCmd, int* pcount, pid_t** parr) {
     int s = 0;
     int fd;
 
+    struct sigaction SI_act = {0}; //child catches SIGINT
+    struct sigaction ST_act = {0}; //ignore SIGTSTP
+
+
     pid = fork();
     switch(pid) {
     case 0: //child
+        //catch ^C
+        SI_act.sa_handler = SI_handler;
+        sigfillset(&SI_act.sa_mask);
+        SI_act.sa_flags = 0;
+        sigaction(SIGINT, &SI_act, NULL);
+        //catch ^Z
+        ST_act.sa_handler = SIG_IGN;
+        sigfillset(&ST_act.sa_mask);
+        ST_act.sa_flags = 0;
+        sigaction(SIGTSTP, &ST_act, NULL);
+
         //input output redirections
         if(currCmd->input != NULL) { 
             if((fd = open(currCmd->input, O_RDONLY)) == -1) {
@@ -139,6 +187,7 @@ int launch(struct cmd* currCmd, int* pcount, pid_t** parr) {
                     exit(EXIT_FAILURE);
                 }
             }
+            close(fd);
         }
 
         if(currCmd->output != NULL) { 
@@ -153,10 +202,11 @@ int launch(struct cmd* currCmd, int* pcount, pid_t** parr) {
                     exit(EXIT_FAILURE);
                 }
             }
+            close(fd);
         }
 
         if(execvp(currCmd->sh_argv[0], currCmd->sh_argv) == -1) {
-            perror("Error");
+            printf("%s: no such file or directory\n", currCmd->sh_argv[0]);
             fflush(stdout);
             exit(EXIT_FAILURE);
         }
@@ -168,6 +218,9 @@ int launch(struct cmd* currCmd, int* pcount, pid_t** parr) {
     default: //parent, wait for child to be done
         if(currCmd->bg_task == 0) { //if its not a background task
             wid = waitpid(pid, &s, 0);
+            if(WEXITSTATUS(s) > 1) {
+                printf("aaa terminated by signal %d\n", WEXITSTATUS(s));
+            }
             fflush(stdout);
         } else {
             printf("background pid is %d\n", pid);
@@ -199,7 +252,7 @@ int sh_execcmd(struct cmd* currCmd, int* status, int* pcount, pid_t** parr) {
         //kill bg children
         if(*pcount > 0) {
             for(int i = 0; i < *pcount; i++) {
-                if(kill((*parr)[i], SIGINT) == -1) {
+                if(kill((*parr)[i], SIGTERM) == -1) {
                     perror("kill");
                     exit(EXIT_FAILURE);
                 }
@@ -261,7 +314,7 @@ struct cmd* sh_processline(char* line) {
 
     //checking for &
     if(strcmp(tempCmd->sh_argv[tempCmd->sh_argc-1], "&") == 0) {
-        tempCmd->bg_task = 1;
+        if(fgmode == 0) tempCmd->bg_task = 1;
         tempCmd->sh_argc--;
 
         if(tempCmd->input == NULL) {
