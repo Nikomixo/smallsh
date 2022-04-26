@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <signal.h>
 
 const int MAX_LEN = 256;
 
@@ -20,8 +21,10 @@ const int MAX_LEN = 256;
 void sh_loop();
 char* sh_readline();
 struct cmd* sh_processline(char* line);
-int sh_execcmd(struct cmd* currCmd, int* status);
-int launch(struct cmd* currCmd);
+int sh_execcmd(struct cmd* currCmd, int* status, int* pcount, pid_t** parr);
+int launch(struct cmd* currCmd, int* pcount, pid_t** parr);
+int checkbgp(int* pcount, pid_t** parr);
+void printStatus(int s);
 
 struct cmd {
     char** sh_argv;
@@ -39,13 +42,17 @@ int main(int argc, char* argv[]) {
     return EXIT_SUCCESS;
 }
 
+
 void sh_loop() {
     int status = 0;
     int running = 1;
+    int pcount = 0; //background processes count
+    pid_t* parr = NULL;    //array of background pids
     char* line;
     struct cmd* currCmd;
 
     do {
+        checkbgp(&pcount, &parr);
         printf(": ");
 
         line = sh_readline();
@@ -64,8 +71,8 @@ void sh_loop() {
                 if(currCmd->output != NULL) printf("output: %s\n", currCmd->output);
                 printf("bg_task: %d\n", currCmd->bg_task);
             }
-
-            running = sh_execcmd(currCmd, &status);
+            
+            running = sh_execcmd(currCmd, &status, &pcount, &parr);
 
             free(currCmd->sh_argv);
             free(currCmd);
@@ -74,8 +81,44 @@ void sh_loop() {
     } while (running);
 }
 
+//checking if background processes are completed or not.
+int checkbgp(int* pcount, pid_t** parr) {
+    int s;
+    pid_t* tempParr;
+    pid_t pid;
+    int pos = -1;
+
+    while((pid = waitpid(-1, &s, WNOHANG)) > 0) {
+        
+        if(s <= 1) {
+            printf("background pid %d is done, exit value %d\n", pid, s);
+        } else {
+            printf("background pid %d is done, terminated by signal %d\n", pid, s);
+        }
+        fflush(stdout);
+
+        if(*pcount == 1) { //if last in arr, free parr and set it to null
+            *pcount -= 1;
+            free(*parr);
+            *parr = NULL; //setting it to null because realloc behaves like malloc if dest is null
+        } else {
+            for(int i = 0; i < *pcount; i++) { //else remove process from array
+                if((*parr)[i] == pid) {
+                    pos = i;
+                }
+            }
+            for(int i = pos; i < *pcount-1; i++) {
+                (*parr)[i] = (*parr)[i+1];
+            }
+            *pcount -= 1;
+            *parr = realloc(*parr, sizeof(pid_t) * *pcount);
+        }
+    }
+    return 0;
+}
+
 //executing non built in cmd
-int launch(struct cmd* currCmd) {
+int launch(struct cmd* currCmd, int* pcount, pid_t** parr) {
     pid_t pid, wid;
     int s = 0;
     int fd;
@@ -123,8 +166,17 @@ int launch(struct cmd* currCmd) {
         fflush(stdout);
         break;
     default: //parent, wait for child to be done
-        wid = waitpid(pid, &s, 0);
-        fflush(stdout);
+        if(currCmd->bg_task == 0) { //if its not a background task
+            wid = waitpid(pid, &s, 0);
+            fflush(stdout);
+        } else {
+            printf("background pid is %d\n", pid);
+            fflush(stdout);
+            *pcount += 1;
+            *parr = realloc(*parr, (sizeof(pid_t*) * (*pcount)));
+            (*parr)[*pcount - 1] = pid;
+            wid = waitpid(pid, &s, WNOHANG);
+        }
         break;
     }
     if(s != 0) s = 1;
@@ -132,13 +184,28 @@ int launch(struct cmd* currCmd) {
 }
 
 //executing built in commands or calling launch
-int sh_execcmd(struct cmd* currCmd, int* status) {
+int sh_execcmd(struct cmd* currCmd, int* status, int* pcount, pid_t** parr) {
 
     //look for built in cmds
     if(strcmp(currCmd->sh_argv[0], "status") == 0) {
-        printf("exit value %d\n", *status);
+        if(*status <= 1) {
+            printf("exit value %d\n", *status);
+        } else {
+            printf("terminated by signal %d\n", *status);
+        }
+        fflush(stdout);
         return 1;
     } else if(strcmp(currCmd->sh_argv[0], "exit") == 0) {
+        //kill bg children
+        if(*pcount > 0) {
+            for(int i = 0; i < *pcount; i++) {
+                if(kill((*parr)[i], SIGINT) == -1) {
+                    perror("kill");
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
+        if(*pcount > 0) free(*parr);
         return 0;
     } else if(strcmp(currCmd->sh_argv[0], "cd") == 0) {
 
@@ -154,7 +221,7 @@ int sh_execcmd(struct cmd* currCmd, int* status) {
         return 1;
     } else {
         // else execute command w/ exec
-        *status = launch(currCmd);
+        *status = launch(currCmd, pcount, parr);
         return 1;
     }
 }
@@ -196,6 +263,13 @@ struct cmd* sh_processline(char* line) {
     if(strcmp(tempCmd->sh_argv[tempCmd->sh_argc-1], "&") == 0) {
         tempCmd->bg_task = 1;
         tempCmd->sh_argc--;
+
+        if(tempCmd->input == NULL) {
+            tempCmd->input = "/dev/null";
+        }
+        if(tempCmd->output == NULL) {
+            tempCmd->output = "/dev/null";
+        }
     } else {
         tempCmd->bg_task = 0;
     }
@@ -252,3 +326,4 @@ char* sh_readline() {
 
     return buffer;
 }
+
